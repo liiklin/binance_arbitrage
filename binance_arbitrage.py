@@ -3,7 +3,7 @@ from collections import defaultdict
 
 #simulation variables
 simulation = True	#True if you want to simulate, False if you want to connect to Binance API 
-simlength = None     #number of data files to use for simulation. Simulation time is simlength * interval between data files, usually 1 second
+simlength = 10000     #number of data files to use for simulation. Simulation time is simlength * interval between data files, usually 1 second. Set to None to process all files in folder
 simulation_data_directory = 'C:/Users/rishi\Documents\Scripts\Arb\BinanceScraping/1 Second Pitch (2)'
 plot_data = True
 
@@ -46,9 +46,11 @@ def simulation_init(simulation_data_directory, simlength = None):
 #reads ticker data file (https://www.binance.com/api/v3/ticker/bookTicker). Returns a list of all trading pairs in format price_matrix[coin to sell][coin to buy] = cost.
 #
 # example: I want to buy 12 BTC worth of ETH. Ignoring trading fees, the amount of ETH I can afford = 12 * pricematrix['BTC']['ETH'] 
-
 def get_prices(ticker_data, cryptosofinterest):
 
+	#given a ticker and list of valid symbols, this function figures out which symbol is first and which is second.
+	#example: ETHBTC, will return coin1 = ETH, coin2 = BTC, True. Useful for assigning bid/ask prices accordingly
+	# returns , , False if no match is found
 	def find_match(ticker_symbol, cryptosofinterest):
 		ticker_symbol_length = len(ticker_symbol)
 
@@ -66,36 +68,39 @@ def get_prices(ticker_data, cryptosofinterest):
 
 		return(0, 0, False)	
 
-	# price_matrix = [[0 for x in range(len(cryptosofinterest))] for y in range(len(cryptosofinterest))] #intialize price matrix to zeros
-	price_matrix = defaultdict(dict)
+	price_matrix = defaultdict(dict)		#initialize price list
 
-	for ticker in ticker_data:
-		m , n, found = find_match(ticker['symbol'], cryptosofinterest)
-		if found:
-			price_matrix[m][n] = float(ticker['bidPrice'])
+	for ticker in ticker_data:					#for each ticker in the binance data
+		m , n, found = find_match(ticker['symbol'], cryptosofinterest)		#try to break the ticker into its constituent symbols
+		if found:												#if we found the symbols
+			price_matrix[m][n] = float(ticker['bidPrice'])		#assign the appropriate cost of going from a->b or b->a 
 			price_matrix[n][m] = 1/float(ticker['askPrice'])
 
 	return price_matrix
 
+#brute force search through up to 5 trades. Will only start/end trades in cryptos listed in oktohold (usually just set to USDT)
+#trading fees are considered, and a minimum threshold arbitrage ratio can be specified to filter results below a certain level
+#
+#returns a high-to-low ordered list of potential arbitrage sequences in the format [predicted arbitrage ratio, [list of crypto trading path]] 
 def look_for_arbs(price_matrix, cryptosofinterest,  oktohold, arb_threshold, trading_fee):
 	arbs_found = []	#initialize list for arb opportunities
 
 
-	for starting_coin in oktohold:
-		for coin_a, pair_a in price_matrix[starting_coin].items():
-			arb_ratio_a = pair_a * (1-trading_fee)
+	for starting_coin in oktohold:										#starting coin has to be from oktohold 
+		for coin_a, pair_a in price_matrix[starting_coin].items():		#for each trading pair available to our starting_coin
+			arb_ratio_a = pair_a * (1-trading_fee)						#calculate the hypothetical balance for starting_coin->coin_a
 
-			for coin_b, pair_b in price_matrix[coin_a].items():
-				arb_ratio_b = arb_ratio_a * pair_b * (1-trading_fee)
+			for coin_b, pair_b in price_matrix[coin_a].items():			#for each trading pair available to coin_a
+				arb_ratio_b = arb_ratio_a * pair_b * (1-trading_fee)	#calculate the hypothetical balance for starting_coin->coin_a->coin_b
 
-				for coin_c, pair_c in price_matrix[coin_b].items():
+				for coin_c, pair_c in price_matrix[coin_b].items():		#etc etc
 					arb_ratio_c = arb_ratio_b * pair_c * (1-trading_fee)
 
-					if (arb_ratio_c >= arb_threshold) and (coin_c in oktohold):
-						trading_path = [starting_coin, coin_a, coin_b, coin_c]
+					if (arb_ratio_c >= arb_threshold) and (coin_c in oktohold):	#at this point, we may hypothetically have made it back to an oktohold coin without a reduntant path
+						trading_path = [starting_coin, coin_a, coin_b, coin_c]	#if a path has a desirable arb ratio and ends in an oktohold coin, add the path to the list
 						arbs_found.append([arb_ratio_c, trading_path])
 
-					for coin_d, pair_d in price_matrix[coin_c].items():
+					for coin_d, pair_d in price_matrix[coin_c].items():				#etc etc
 						arb_ratio_d = arb_ratio_c * pair_d * (1-trading_fee)
 
 						if (arb_ratio_d >= arb_threshold) and (coin_d in oktohold):
@@ -109,7 +114,7 @@ def look_for_arbs(price_matrix, cryptosofinterest,  oktohold, arb_threshold, tra
 								trading_path = [starting_coin, coin_a, coin_b, coin_c, coin_d, coin_e]
 								arbs_found.append([arb_ratio_e, trading_path])
 
-							# for coin_f, pair_f in price_matrix[coin_e].items():
+							# for coin_f, pair_f in price_matrix[coin_e].items():								#can keep going, but this layer really brings things to a crawl. also wtf to execute this in real life haha
 							# 	arb_ratio_f = arb_ratio_e * pair_f * (1-trading_fee)
 							#
 							# 	if (arb_ratio_f >= arb_threshold) and (coin_f in oktohold):
@@ -119,6 +124,7 @@ def look_for_arbs(price_matrix, cryptosofinterest,  oktohold, arb_threshold, tra
 	arbs_found.sort(reverse = True)
 	return(arbs_found)				
 
+#given a price matrix, trading path, and trading fee, this function will calculate the arbitrage ratio. Useful for checking up on paths of interest
 def get_arb_status(price_matrix, trading_path, trading_fee):
 	arb_status = 1
 
@@ -127,6 +133,7 @@ def get_arb_status(price_matrix, trading_path, trading_fee):
 
 	return(arb_status) 
 
+# will print out a price matrix to console in human-legible form
 def print_matrix(price_matrix):
 	for key, value in price_matrix.items():
 		printstr = key + ': 	'
@@ -134,6 +141,7 @@ def print_matrix(price_matrix):
 			printstr += str(price_matrix[key][key2])[0:5] + ' ' + key2 + ', '
 		print(printstr[:-2])
 
+# will print out current balance to console in human-legible form
 def print_balance(balance_dict):
 	printstr = "Current Balance: 	"
 	for currency, balance in balance_dict.items():
@@ -142,40 +150,42 @@ def print_balance(balance_dict):
 
 	print(printstr)
 
+# loops through binance historical ticker data and pretends to trade assuming each trade takes 1 second to execute
+# completely ignores step sizes and order size, assumes that entire trade at any increment can be executed at bid/ask price
 def simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest):
-	simdata = simulation_init(simulation_data_directory, simlength)
-	balance = {'USDT': 1.0}
-	USDTbalance = []
+	simdata = simulation_init(simulation_data_directory, simlength)	#load historical data
+	balance = {'USDT': 1.0}	#assume you start with 1 USDT.
+	USDTbalance = []		#used to track USDT balance over time. only used for graphing at the end
 
 	trading_fee = 0.0005	#assume BNB for now
 	arb_threshold = 1.000	#look for any positive arbitrage paths
 
 	arbs_checking = []		#array of opportunities that have been spotted, and are to be monitored before deciding whether to execute
-	tradeinprogress = False
+	tradeinprogress = False	#indicates whether to look for arbitrages (False), or execute a trade (True)
 
 	for tickerindex, ticker in enumerate(simdata):
-		sys.stdout.write('Checking for opportunities: %i / %i\r' % (tickerindex+1, simlength))
+		sys.stdout.write('Checking for opportunities: %i / %i\r' % (tickerindex+1, simlength))		#Print progress to console
 		sys.stdout.flush()
-		price_matrix = get_prices(ticker, cryptosofinterest)
+		price_matrix = get_prices(ticker, cryptosofinterest)	#get price matrix for current dataset
 		# print_matrix(price_matrix)
-		opportunities = look_for_arbs(price_matrix, cryptosofinterest, oktohold, arb_threshold, trading_fee)
 
-		if not tradeinprogress:
-			for arb in opportunities:
-				if not any(arb[1] in monitored_arbs for monitored_arbs in arbs_checking):
-					arbs_checking.append([0, arb[1]])
+		if not tradeinprogress:																						#if we aren't trading 
+			opportunities = look_for_arbs(price_matrix, cryptosofinterest, oktohold, arb_threshold, trading_fee)	#Look for any arbitrage opportunities in this given timepoint
+			for arb in opportunities:																				#check all the opportunities found in this timepoint
+				if not any(arb[1] in monitored_arbs for monitored_arbs in arbs_checking):							# if this trading path isnt already being considered
+					arbs_checking.append([0, arb[1]])																# add it to the list [opportunity lifetime, [trading path]]
 
 			# if(len(arbs_checking)>0):
 				# print('\n-----Potential Trades-----')
 
-			for arb in arbs_checking:
-				arbstatus = get_arb_status(price_matrix, arb[1], trading_fee)
-				if arbstatus >= trade_relaxation_threshold:
-					arb[0] += 1
+			for arb in arbs_checking:																				#for all paths being considered 
+				arbstatus = get_arb_status(price_matrix, arb[1], trading_fee)										#get the current value of this path
+				if arbstatus >= trade_relaxation_threshold:															#if its still valuable enough to be of interest
+					arb[0] += 1																						#increment its lifetime
 					# print(arb, arbstatus)
-					if arb[0] >= trade_duration_required:
-						printstring = ''
-						approved_trade_path = arb[1]
+					if arb[0] >= trade_duration_required:															#if its been around long enough that we think it will stick around
+						printstring = ''	
+						approved_trade_path = arb[1]																#set up for executing a trade
 						tradeinprogress = True
 						trade_step = 0
 
@@ -183,29 +193,29 @@ def simulate_market_monitor(simulation_data_directory, simlength, cryptosofinter
 						arbs_checking = []
 						break
 				else:
-					arbs_checking.remove(arb)
+					arbs_checking.remove(arb)																		#if it is no longer valuable enough, remove it from the list
 
-		if tradeinprogress:
-			inputcoin = approved_trade_path[trade_step]
-			outputcoin = approved_trade_path[trade_step+1]
-			inputbalance = balance.get(inputcoin, None)
+		if tradeinprogress:																							#if a trade has been approved, we will iterate through the trading path at a rate of one trade per timepoint (1s)
+			inputcoin = approved_trade_path[trade_step]																#get the symbols of coins involved in current trading step
+			outputcoin = approved_trade_path[trade_step+1]															
+			inputbalance = balance.get(inputcoin, None)																#get our current balance of coins involved in current trading step
 			outputbalance = balance.get(outputcoin, None)
 
-			if outputbalance == None:
+			if outputbalance == None:																				#if the coin we are buying doesn't exist in our balance sheet, add an entry for it
 				balance[outputcoin] = inputbalance * trade_fraction * price_matrix[inputcoin][outputcoin] * (1-trading_fee)
-			else:
+			else:																									#otherwise just adjust the balance accordingly
 				balance[outputcoin] += inputbalance * trade_fraction * price_matrix[inputcoin][outputcoin] * (1-trading_fee)
 			
-			balance[inputcoin] = inputbalance * (1-trade_fraction)
+			balance[inputcoin] = inputbalance * (1-trade_fraction)													#reduce the outgoing balance accordingly
 
-			trade_step +=1
-			print_balance(balance)
+			trade_step +=1																							#increment so we execute the next trading step on next iteration
+			print_balance(balance)							
 
-			if trade_step == len(approved_trade_path)-1:
+			if trade_step == len(approved_trade_path)-1:															#once we reach the last step, flag the trade as complete
 				tradeinprogress = False
 
 
-		if plot_data:
+		if plot_data:																								#if we're plotting, record the USDT balance for each datapoint. Need to do some stupid to keep the graph from going to 0 during trades
 			if balance['USDT'] == 0:
 				USDTbalance.append(USDTbalance[tickerindex-1])
 			else:
@@ -230,4 +240,4 @@ def simulate_market_monitor(simulation_data_directory, simlength, cryptosofinter
 
 # def market_monitor():
 
-simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest)
+simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest)								#run the script

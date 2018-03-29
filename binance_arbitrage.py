@@ -1,5 +1,11 @@
 import sys
 from collections import defaultdict
+import threading
+import requests
+import json
+import os
+import matplotlib.pyplot as plt
+import numpy as np
 
 #simulation variables
 simulation = True	#True if you want to simulate, False if you want to connect to Binance API 
@@ -8,7 +14,7 @@ simulation_data_directory = 'C:/Users/rishi\Documents\Scripts\Arb\BinanceScrapin
 plot_data = True
 
 #Parameters
-trade_duration_required = 10			#time an arb value must stay over a certain threshold to be executed
+trade_duration_required = 5				#time an arb value must stay over a certain threshold to be executed
 trade_relaxation_threshold = 1.000		#amount an arb value must stay over throughout the required duration to be executed
 trade_fraction = 1.0					#what % of total amount should be traded at a given step. This will be useful/dynamic for step sizes, right now just default to 1
 
@@ -21,8 +27,6 @@ oktohold = ['USDT']		#coins that you are ok holding a balance of in between trad
 
 #load historical binance ticker data files (from https://www.binance.com/api/v3/ticker/bookTicker) from a specified directory. assumes files are in order.
 def simulation_init(simulation_data_directory, simlength = None):
-	import json
-	import os
 	simdata = []	#initialize simulation data output list
 
 	filenames = os.listdir(simulation_data_directory)	#get all files in simulation_data_directory
@@ -237,7 +241,135 @@ def simulate_market_monitor(simulation_data_directory, simlength, cryptosofinter
 	print_balance(balance)
 
 
+def market_monitor(cryptosofinterest, queryfrequency, tradefrequency, balance, trading_fee, arb_threshold, arbs_checking, tradeinprogress):
+	import time
+	import datetime
 
-# def market_monitor():
+	timedata = []
+	timedata.append(datetime.datetime.now())
 
-simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest)								#run the script
+	USDTbalance = []
+	USDTbalance.append(balance['USDT'])
+
+	sleeptime = queryfrequency
+
+	fig = plt.figure()
+	ax = fig.add_subplot(111)
+	h1, = ax.plot(timedata, USDTbalance, 'b-')
+	
+	plt.ion()
+	plt.show()
+
+	while(True):
+		try:
+			ticker = json.loads(requests.get('https://www.binance.com/api/v3/ticker/bookTicker').content)
+		except requests.exceptions.ConnectionError:
+   		    r.status_code = "Connection refused"
+		
+		price_matrix = get_prices(ticker, cryptosofinterest)	#get price matrix for current dataset
+
+	
+		# print_matrix(price_matrix)
+
+		if not tradeinprogress:			#if we aren't trading 
+			os.system('cls')																						#clear screen
+			print_balance(balance)
+			print('\nChecking for opportunities ', str(datetime.datetime.now()))									#Print progress to console																					
+			opportunities = look_for_arbs(price_matrix, cryptosofinterest, oktohold, arb_threshold, trading_fee)	#Look for any arbitrage opportunities in this given timepoint
+			for arb in opportunities:																				#check all the opportunities found in this timepoint
+				if not any(arb[1] in monitored_arbs for monitored_arbs in arbs_checking):							# if this trading path isnt already being considered
+					arbs_checking.append([0, 0, arb[1]])														    # add it to the list [arb_status, opportunity lifetime, [trading path]]
+
+			if(len(arbs_checking)>0):
+				print('\n		-----Potential Trades-----')
+
+			arbs_checking.sort(reverse = True)																		#sort list so highest margins are checked first
+
+			for arb in arbs_checking:																				#for all paths being considered 
+				arb[0] = get_arb_status(price_matrix, arb[2], trading_fee)											#get the current value of this path
+				print(arb)
+				if arb[0] >= trade_relaxation_threshold:															#if its still valuable enough to be of interest
+					arb[1] += 1																						#increment its lifetime
+					if arb[1] >= trade_duration_required:															#if its been around long enough that we think it will stick around
+						printstring = ''	
+						approved_trade_path = arb[2]																#set up for executing a trade
+						tradeinprogress = True
+						sleeptime = tradefrequency
+						trade_step = 0
+						os.system('cls')
+						print('Trade Opportunity: ', arb[2])
+						arbs_checking = []
+						break
+				else:
+					arbs_checking.remove(arb)																		#if it is no longer valuable enough, remove it from the list
+
+			h1.set_xdata(timedata)
+			h1.set_ydata(USDTbalance)
+			plt.pause(0.0001)
+			plt.axis([timedata[0], timedata[-1], min(USDTbalance), max(USDTbalance)])
+			fig.canvas.draw()
+
+		if tradeinprogress:																							#if a trade has been approved, we will iterate through the trading path at a rate of one trade per timepoint (1s)
+			inputcoin = approved_trade_path[trade_step]																#get the symbols of coins involved in current trading step
+			outputcoin = approved_trade_path[trade_step+1]															
+			inputbalance = balance.get(inputcoin, None)																#get our current balance of coins involved in current trading step
+			outputbalance = balance.get(outputcoin, None)
+
+			if outputbalance == None:																				#if the coin we are buying doesn't exist in our balance sheet, add an entry for it
+				balance[outputcoin] = inputbalance * trade_fraction * price_matrix[inputcoin][outputcoin] * (1-trading_fee)
+			else:																									#otherwise just adjust the balance accordingly
+				balance[outputcoin] += inputbalance * trade_fraction * price_matrix[inputcoin][outputcoin] * (1-trading_fee)
+			
+			balance[inputcoin] = inputbalance * (1-trade_fraction)													#reduce the outgoing balance accordingly
+
+			trade_step +=1																							#increment so we execute the next trading step on next iteration
+			print_balance(balance)							
+
+			if trade_step == len(approved_trade_path)-1:															#once we reach the last step, flag the trade as complete
+				tradeinprogress = False
+				sleeptime = queryfrequency
+
+
+		if balance['USDT'] > 0:
+			USDTbalance.append(balance['USDT'])
+		else:
+			USDTbalance.append(USDTbalance[-1])
+
+		timedata.append(datetime.datetime.now())
+		# USDTbalance.append(balance['USDT'])
+
+
+
+
+		time.sleep(sleeptime)
+	# if plot_data:
+	# 	import matplotlib.pyplot as plt
+	# 	import numpy as np
+
+	# 	x = np.linspace(1,simlength, simlength)
+	# 	fig = plt.figure()
+
+	# 	plt.plot(x, USDTbalance)
+	# 	plt.plot(x, x/x, dashes=[5, 5])
+	# 	plt.show()
+
+
+	# print('-------Final Results--------')
+	# print_balance(balance)
+
+def initialize_market_monitor(cryptosofinterest, queryfrequency, tradefrequency):
+	balance = {'USDT': 1.0}	#assume you start with 1 USDT.
+	USDTbalance = []		#used to track USDT balance over time. only used for graphing at the end
+
+	trading_fee = 0.0005	#assume BNB for now
+	arb_threshold = 1.000	#look for any positive arbitrage paths
+
+	arbs_checking = []		#array of opportunities that have been spotted, and are to be monitored before deciding whether to execute
+	tradeinprogress = False	#indicates whether to look for arbitrages (False), or execute a trade (True)
+
+	api_url_base = 'https://www.binance.com/api/'
+	market_monitor(cryptosofinterest, queryfrequency, tradefrequency, balance, trading_fee, arb_threshold, arbs_checking, tradeinprogress)
+
+
+# simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest)								#run the script
+initialize_market_monitor(cryptosofinterest, 0.5, 0.1)

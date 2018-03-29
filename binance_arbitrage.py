@@ -22,7 +22,7 @@ trade_fraction = 1.0					#what % of total amount should be traded at a given ste
 #cryptos of interest are considered as viable for trading
 
 cryptosofinterest = ['USDT', 'XMR', 'NEO', 'XRP', 'XZC', 'POA', 'DLT', 'OAX', 'AST', 'MCO', 'TRX', 'ICN', 'OMG', 'BCC', 'WTC', 'MOD', 'QSP', 'BNB', 'NEB', 'GXS', 'MAN', 'XEM', 'DGD', 'ADA', 'GVT', 'ARN', 'REQ', 'AIO', 'OST', 'TRI', 'APP', 'XVG', 'IOT', 'NUL', 'MTH', 'MTL', 'ENJ', 'VIA', 'IOS', 'SUB', 'ARK', 'POW', 'INS', 'LUN', 'CHA', 'AEB', 'RDN', 'BCD', 'BQX', 'WAV', 'PPT', 'MDA', 'LTC', 'WAB', 'POE', 'LEN', 'TNT', 'ZRX', 'ZIL', 'BAT', 'KMD', 'EOS', 'ADX', 'BRD', 'RLC', 'LSK', 'WAN', 'ENG', 'EVX', 'DNT', 'ICX', 'QTU', 'CMT', 'RCN', 'ETH', 'STEEM', 'STR', 'ELF', 'SNM', 'VEN', 'NAN', 'BNT', 'BTC', 'CND', 'BCP', 'NCA', 'KNC', 'AMB', 'ETC', 'SNG', 'FUE', 'WIN', 'TNB', 'AEE', 'BLZ', 'ZEC', 'BTS', 'GTO', 'EDO', 'CTR', 'CDT', 'NAV', 'VIB', 'RPX', 'XLM', 'LIN', 'ONT', 'GAS', 'DAS', 'BTG', 'SNT', 'PIV', 'LRC', 'HSR', 'STO', 'YOY', 'SAL', 'FUN']
-# cryptosofinterest = ['USDT', 'BTC', 'ETH', 'DASH', 'XRP', 'LTC']
+# cryptosofinterest = ['USDT', 'BTC', 'ETH', 'DASH', 'XRP', 'LTC', 'NEO']
 oktohold = ['USDT']		#coins that you are ok holding a balance of in between trades
 
 #load historical binance ticker data files (from https://www.binance.com/api/v3/ticker/bookTicker) from a specified directory. assumes files are in order.
@@ -75,12 +75,45 @@ def get_prices(ticker_data, cryptosofinterest):
 	price_matrix = defaultdict(dict)		#initialize price list
 
 	for ticker in ticker_data:					#for each ticker in the binance data
-		m , n, found = find_match(ticker['symbol'], cryptosofinterest)		#try to break the ticker into its constituent symbols
+		m , n, found = find_match(ticker['Symbol'], cryptosofinterest)		#try to break the ticker into its constituent symbols   rest: 'symbol', websocket: 's'
 		if found:												#if we found the symbols
-			price_matrix[m][n] = float(ticker['bidPrice'])		#assign the appropriate cost of going from a->b or b->a 
-			price_matrix[n][m] = 1/float(ticker['askPrice'])
+			price_matrix[m][n] = float(ticker['bidPrice'])		#assign the appropriate cost of going from a->b or b->a 	rest: 'bidPrice', websocket: 'b'
+			price_matrix[n][m] = 1/float(ticker['askPrice'])	# rest: 'askPrice', websocket: 'a'
 
 	return price_matrix
+
+#takes in old price matrix, overwrites with any new data from websocket. Possible issue with stale data, but I think websocket updates anything that has changed.
+def get_prices_websocket(ticker_data, price_matrix, cryptosofinterest):
+
+	#given a ticker and list of valid symbols, this function figures out which symbol is first and which is second.
+	#example: ETHBTC, will return coin1 = ETH, coin2 = BTC, True. Useful for assigning bid/ask prices accordingly
+	# returns , , False if no match is found
+	def find_match(ticker_symbol, cryptosofinterest):
+		ticker_symbol_length = len(ticker_symbol)
+
+		for coin1_index, coin1 in enumerate(cryptosofinterest):
+			coin1_symbol_length = len(coin1)
+			if coin1 == ticker_symbol[:coin1_symbol_length]:
+				for coin2 in cryptosofinterest[coin1_index:]:
+					if coin2 == ticker_symbol[coin1_symbol_length:]:
+						return coin1, coin2, True
+
+			if coin1 == ticker_symbol[ticker_symbol_length-coin1_symbol_length:]:
+				for coin2 in cryptosofinterest[coin1_index:]:
+					if coin2 == ticker_symbol[:ticker_symbol_length - coin1_symbol_length]:
+						return coin2, coin1, True
+
+		return(0, 0, False)	
+
+
+	for ticker in ticker_data:					#for each ticker in the binance data
+		m , n, found = find_match(ticker['s'], cryptosofinterest)		#try to break the ticker into its constituent symbols   rest: 'symbol', websocket: 's'
+		if found:												#if we found the symbols
+			price_matrix[m][n] = float(ticker['b'])		#assign the appropriate cost of going from a->b or b->a 	rest: 'bidPrice', websocket: 'b'
+			price_matrix[n][m] = 1/float(ticker['a'])	# rest: 'askPrice', websocket: 'a'
+
+	return price_matrix
+	
 
 #brute force search through up to 5 trades. Will only start/end trades in cryptos listed in oktohold (usually just set to USDT)
 #trading fees are considered, and a minimum threshold arbitrage ratio can be specified to filter results below a certain level
@@ -244,6 +277,8 @@ def simulate_market_monitor(simulation_data_directory, simlength, cryptosofinter
 def market_monitor(cryptosofinterest, queryfrequency, tradefrequency, balance, trading_fee, arb_threshold, arbs_checking, tradeinprogress):
 	import time
 	import datetime
+	import websocket
+	import ssl
 
 	timedata = []
 	timedata.append(datetime.datetime.now())
@@ -260,19 +295,29 @@ def market_monitor(cryptosofinterest, queryfrequency, tradefrequency, balance, t
 	plt.ion()
 	plt.show()
 
+	ws = websocket.WebSocket(sslopt={"cert_reqs": ssl.CERT_NONE})
+	ws.connect("wss://stream.binance.com:9443/ws/!ticker@arr")
+
+	price_matrix = defaultdict(dict)		#initialize price list
+
+
 	while(True):
-		try:
-			ticker = json.loads(requests.get('https://www.binance.com/api/v3/ticker/bookTicker').content)
-		except requests.exceptions.ConnectionError:
-   		    r.status_code = "Connection refused"
+		# try:
+		# 	ticker = json.loads(requests.get('https://www.binance.com/api/v3/ticker/bookTicker').content)
+		# except requests.exceptions.ConnectionError:
+		#	r.status_code = "Connection refused"
 		
-		price_matrix = get_prices(ticker, cryptosofinterest)	#get price matrix for current dataset
+		ticker = json.loads(ws.recv())
+		price_matrix = get_prices_websocket(ticker, price_matrix, cryptosofinterest)	#get price matrix for current dataset
 
 	
 		# print_matrix(price_matrix)
 
 		if not tradeinprogress:			#if we aren't trading 
 			os.system('cls')																						#clear screen
+			# print_matrix(price_matrix)
+			print(len(ticker))
+
 			print_balance(balance)
 			print('\nChecking for opportunities ', str(datetime.datetime.now()))									#Print progress to console																					
 			opportunities = look_for_arbs(price_matrix, cryptosofinterest, oktohold, arb_threshold, trading_fee)	#Look for any arbitrage opportunities in this given timepoint
@@ -372,4 +417,4 @@ def initialize_market_monitor(cryptosofinterest, queryfrequency, tradefrequency)
 
 
 # simulate_market_monitor(simulation_data_directory, simlength, cryptosofinterest)								#run the script
-initialize_market_monitor(cryptosofinterest, 0.5, 0.1)
+initialize_market_monitor(cryptosofinterest, 0.1, 0.1)
